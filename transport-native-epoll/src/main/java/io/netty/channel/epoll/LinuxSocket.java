@@ -17,10 +17,12 @@ package io.netty.channel.epoll;
 
 import io.netty.channel.ChannelException;
 import io.netty.channel.DefaultFileRegion;
+import io.netty.channel.socket.InternetProtocolFamily;
 import io.netty.channel.unix.Errors.NativeIoException;
 import io.netty.channel.unix.NativeInetAddress;
 import io.netty.channel.unix.PeerCredentials;
 import io.netty.channel.unix.Socket;
+import io.netty.util.internal.PlatformDependent;
 import io.netty.util.internal.ThrowableUtil;
 
 import java.io.IOException;
@@ -39,8 +41,8 @@ import static io.netty.channel.unix.Errors.newConnectionResetException;
  * A socket which provides access Linux native methods.
  */
 final class LinuxSocket extends Socket {
-    private static final InetAddress INET_ANY = unsafeInetAddrByName("0.0.0.0");
-    private static final InetAddress INET6_ANY = unsafeInetAddrByName("::");
+    static final InetAddress INET_ANY = unsafeInetAddrByName("0.0.0.0");
+    static final InetAddress INET6_ANY = unsafeInetAddrByName("::");
     private static final long MAX_UINT32_T = 0xFFFFFFFFL;
     private static final NativeIoException SENDFILE_CONNECTION_RESET_EXCEPTION =
             newConnectionResetException("syscall:sendfile(...)", ERRNO_EPIPE_NEGATIVE);
@@ -48,7 +50,15 @@ final class LinuxSocket extends Socket {
             new ClosedChannelException(), Native.class, "sendfile(...)");
 
     LinuxSocket(int fd) {
-        super(fd);
+        this(fd, isIPv6Preferred());
+    }
+
+    LinuxSocket(int fd, boolean ipv6) {
+        super(fd, ipv6);
+    }
+
+    boolean isIpv6() {
+        return ipv6;
     }
 
     void setTimeToLive(int ttl) throws IOException {
@@ -57,17 +67,16 @@ final class LinuxSocket extends Socket {
 
     void setInterface(InetAddress address) throws IOException {
         final NativeInetAddress a = NativeInetAddress.newInstance(address);
-        setInterface(intValue(), a.address(), a.scopeId());
+        setInterface(intValue(), ipv6, a.address(), a.scopeId(), interfaceIndex(address));
     }
 
-    void setNetworkInterface(NetworkInterface netInterface) throws IOException {
-        final NativeInetAddress i = NativeInetAddress.newInstance(deriveInetAddress(netInterface, false));
-        if (i.equals(INET_ANY)) {
-            final NativeInetAddress i6 = NativeInetAddress.newInstance(deriveInetAddress(netInterface, true));
-            setInterface(intValue(), i6.address(), i6.scopeId());
-        } else {
-            setInterface(intValue(), i.address(), i.scopeId());
+    void setNetworkInterface(NetworkInterface netInterface, InternetProtocolFamily family) throws IOException {
+        InetAddress address = deriveInetAddress(netInterface, family == InternetProtocolFamily.IPv6);
+        if (address.equals(family == InternetProtocolFamily.IPv4 ? INET6_ANY : INET_ANY)) {
+            throw new IOException("NetworkInterface does not support " + family);
         }
+        final NativeInetAddress nativeAddress = NativeInetAddress.newInstance(address);
+        setInterface(intValue(), ipv6, nativeAddress.address(), nativeAddress.scopeId(), interfaceIndex(netInterface));
     }
 
     void joinGroup(InetAddress group, NetworkInterface netInterface, InetAddress source) throws IOException {
@@ -76,9 +85,10 @@ final class LinuxSocket extends Socket {
         final NativeInetAddress i = NativeInetAddress.newInstance(deriveInetAddress(netInterface, isIpv6));
         if (source != null) {
             final NativeInetAddress s = NativeInetAddress.newInstance(source);
-            joinSsmGroup(intValue(), g.address(), i.address(), g.scopeId(), s.address());
+            joinSsmGroup(intValue(), ipv6, g.address(), i.address(),
+                    g.scopeId(), interfaceIndex(netInterface), s.address());
         } else {
-            joinGroup(intValue(), g.address(), i.address(), g.scopeId());
+            joinGroup(intValue(), ipv6, g.address(), i.address(), g.scopeId(), interfaceIndex(netInterface));
         }
     }
 
@@ -88,10 +98,25 @@ final class LinuxSocket extends Socket {
         final NativeInetAddress i = NativeInetAddress.newInstance(deriveInetAddress(netInterface, isIpv6));
         if (source != null) {
             final NativeInetAddress s = NativeInetAddress.newInstance(source);
-            leaveSsmGroup(intValue(), g.address(), i.address(), g.scopeId(), s.address());
+            leaveSsmGroup(intValue(), ipv6, g.address(), i.address(),
+                    g.scopeId(), interfaceIndex(netInterface), s.address());
         } else {
-            leaveGroup(intValue(), g.address(), i.address(), g.scopeId());
+            leaveGroup(intValue(), ipv6, g.address(), i.address(), g.scopeId(), interfaceIndex(netInterface));
         }
+    }
+
+    private static int interfaceIndex(NetworkInterface networkInterface) {
+        return PlatformDependent.javaVersion() >= 7 ? networkInterface.getIndex() : -1;
+    }
+
+    private static int interfaceIndex(InetAddress address) throws IOException {
+        if (PlatformDependent.javaVersion() >= 7) {
+            NetworkInterface iface = NetworkInterface.getByInetAddress(address);
+            if (iface != null) {
+                return iface.getIndex();
+            }
+        }
+        return -1;
     }
 
     void setTcpDeferAccept(int deferAccept) throws IOException {
@@ -167,7 +192,7 @@ final class LinuxSocket extends Socket {
 
     void setTcpMd5Sig(InetAddress address, byte[] key) throws IOException {
         final NativeInetAddress a = NativeInetAddress.newInstance(address);
-        setTcpMd5Sig(intValue(), a.address(), a.scopeId(), key);
+        setTcpMd5Sig(intValue(), ipv6, a.address(), a.scopeId(), key);
     }
 
     boolean isTcpCork() throws IOException  {
@@ -234,7 +259,7 @@ final class LinuxSocket extends Socket {
         return ioResult("sendfile", (int) res, SENDFILE_CONNECTION_RESET_EXCEPTION, SENDFILE_CLOSED_CHANNEL_EXCEPTION);
     }
 
-    private InetAddress deriveInetAddress(NetworkInterface netInterface, boolean ipv6) throws IOException {
+    private static InetAddress deriveInetAddress(NetworkInterface netInterface, boolean ipv6) {
         final InetAddress ipAny = ipv6 ? INET6_ANY : INET_ANY;
         if (netInterface != null) {
             final Enumeration<InetAddress> ias = netInterface.getInetAddresses();
@@ -249,12 +274,20 @@ final class LinuxSocket extends Socket {
         return ipAny;
     }
 
+    public static LinuxSocket newSocketStream(boolean ipv6) {
+        return new LinuxSocket(newSocketStream0(ipv6), ipv6);
+    }
+
     public static LinuxSocket newSocketStream() {
-        return new LinuxSocket(newSocketStream0());
+        return newSocketStream(isIPv6Preferred());
+    }
+
+    public static LinuxSocket newSocketDgram(boolean ipv6) {
+        return new LinuxSocket(newSocketDgram0(ipv6), ipv6);
     }
 
     public static LinuxSocket newSocketDgram() {
-        return new LinuxSocket(newSocketDgram0());
+        return newSocketDgram(isIPv6Preferred());
     }
 
     public static LinuxSocket newSocketDomain() {
@@ -269,14 +302,14 @@ final class LinuxSocket extends Socket {
         }
     }
 
-    private static native void joinGroup(int fd, byte[] group, byte[] interfaceAddress,
-                                         int scopeId) throws IOException;
-    private static native void joinSsmGroup(int fd, byte[] group, byte[] interfaceAddress,
-                                            int scopeId, byte[] source) throws IOException;
-    private static native void leaveGroup(int fd, byte[] group, byte[] interfaceAddress,
-                                          int scopeId) throws IOException;
-    private static native void leaveSsmGroup(int fd, byte[] group, byte[] interfaceAddress,
-                                             int scopeId, byte[] source) throws IOException;
+    private static native void joinGroup(int fd, boolean ipv6, byte[] group, byte[] interfaceAddress,
+                                         int scopeId, int interfaceIndex) throws IOException;
+    private static native void joinSsmGroup(int fd, boolean ipv6, byte[] group, byte[] interfaceAddress,
+                                            int scopeId, int interfaceIndex, byte[] source) throws IOException;
+    private static native void leaveGroup(int fd, boolean ipv6, byte[] group, byte[] interfaceAddress,
+                                          int scopeId, int interfaceIndex) throws IOException;
+    private static native void leaveSsmGroup(int fd, boolean ipv6, byte[] group, byte[] interfaceAddress,
+                                             int scopeId, int interfaceIndex, byte[] source) throws IOException;
     private static native long sendFile(int socketFd, DefaultFileRegion src, long baseOffset,
                                         long offset, long length) throws IOException;
 
@@ -311,7 +344,9 @@ final class LinuxSocket extends Socket {
     private static native void setIpFreeBind(int fd, int freeBind) throws IOException;
     private static native void setIpTransparent(int fd, int transparent) throws IOException;
     private static native void setIpRecvOrigDestAddr(int fd, int transparent) throws IOException;
-    private static native void setTcpMd5Sig(int fd, byte[] address, int scopeId, byte[] key) throws IOException;
-    private static native void setInterface(int fd, byte[] interfaceAddress, int scopeId) throws IOException;
+    private static native void setTcpMd5Sig(
+            int fd, boolean ipv6, byte[] address, int scopeId, byte[] key) throws IOException;
+    private static native void setInterface(
+            int fd, boolean ipv6, byte[] interfaceAddress, int scopeId, int networkInterfaceIndex) throws IOException;
     private static native void setTimeToLive(int fd, int ttl) throws IOException;
 }

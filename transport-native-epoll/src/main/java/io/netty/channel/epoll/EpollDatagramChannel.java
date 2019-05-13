@@ -27,23 +27,25 @@ import io.netty.channel.DefaultAddressedEnvelope;
 import io.netty.channel.socket.DatagramChannel;
 import io.netty.channel.socket.DatagramChannelConfig;
 import io.netty.channel.socket.DatagramPacket;
+import io.netty.channel.socket.InternetProtocolFamily;
 import io.netty.channel.unix.DatagramSocketAddress;
 import io.netty.channel.unix.Errors;
 import io.netty.channel.unix.IovArray;
+import io.netty.channel.unix.Socket;
 import io.netty.channel.unix.UnixChannelUtil;
 import io.netty.util.internal.StringUtil;
 
 import java.io.IOException;
+import java.net.Inet4Address;
 import java.net.InetAddress;
-import java.net.Inet6Address;
 import java.net.InetSocketAddress;
 import java.net.NetworkInterface;
 import java.net.PortUnreachableException;
 import java.net.SocketAddress;
-import java.net.SocketException;
 import java.nio.ByteBuffer;
 
 import static io.netty.channel.epoll.LinuxSocket.newSocketDgram;
+import static io.netty.channel.unix.Socket.isIPv6Preferred;
 
 /**
  * {@link DatagramChannel} implementation that uses linux EPOLL Edge-Triggered Mode for
@@ -58,20 +60,47 @@ public final class EpollDatagramChannel extends AbstractEpollChannel implements 
             StringUtil.simpleClassName(InetSocketAddress.class) + ">, " +
             StringUtil.simpleClassName(ByteBuf.class) + ')';
 
+    final InternetProtocolFamily family;
     private final EpollDatagramChannelConfig config;
     private volatile boolean connected;
 
+    /**
+     * Create a new instance which selects the {@link InternetProtocolFamily} to use depending
+     * on the Operation Systems default which will be chosen.
+     */
     public EpollDatagramChannel() {
-        super(newSocketDgram());
+        this(null);
+    }
+
+    /**
+     * Create a new instance using the given {@link InternetProtocolFamily}. If {@code null} is used it will depend
+     * on the Operation Systems default which will be chosen.
+     */
+    public EpollDatagramChannel(InternetProtocolFamily family) {
+        super(family == null ?
+                newSocketDgram(Socket.isIPv6Preferred()) : newSocketDgram(family == InternetProtocolFamily.IPv6));
+        this.family = internetProtocolFamily(family);
         config = new EpollDatagramChannelConfig(this);
     }
 
-    public EpollDatagramChannel(int fd) {
-        this(new LinuxSocket(fd));
+    private static InternetProtocolFamily internetProtocolFamily(InternetProtocolFamily family) {
+        if (family == null) {
+            return Socket.isIPv6Preferred() ? InternetProtocolFamily.IPv6 : InternetProtocolFamily.IPv4;
+        }
+        return family;
     }
 
-    EpollDatagramChannel(LinuxSocket fd) {
+    /**
+     * Create a new instance which selects the {@link InternetProtocolFamily} to use depending
+     * on the Operation Systems default which will be chosen.
+     */
+    public EpollDatagramChannel(int fd) {
+        this(new LinuxSocket(fd, isIPv6Preferred()), null);
+    }
+
+    private EpollDatagramChannel(LinuxSocket fd, InternetProtocolFamily family) {
         super(null, fd, true);
+        this.family = internetProtocolFamily(family);
         config = new EpollDatagramChannelConfig(this);
     }
 
@@ -150,15 +179,11 @@ public final class EpollDatagramChannel extends AbstractEpollChannel implements 
             throw new NullPointerException("networkInterface");
         }
 
-        if (multicastAddress instanceof Inet6Address) {
-            promise.setFailure(new UnsupportedOperationException("Multicast not supported"));
-        } else {
-            try {
-                socket.joinGroup(multicastAddress, networkInterface, source);
-                promise.setSuccess();
-            } catch (IOException e) {
-                promise.setFailure(e);
-            }
+        try {
+            socket.joinGroup(multicastAddress, networkInterface, source);
+            promise.setSuccess();
+        } catch (IOException e) {
+            promise.setFailure(e);
         }
         return promise;
     }
@@ -209,15 +234,11 @@ public final class EpollDatagramChannel extends AbstractEpollChannel implements 
             throw new NullPointerException("networkInterface");
         }
 
-        if (multicastAddress instanceof Inet6Address) {
-            promise.setFailure(new UnsupportedOperationException("Multicast not supported"));
-        } else {
-            try {
-                socket.leaveGroup(multicastAddress, networkInterface, source);
-                promise.setSuccess();
-            } catch (IOException e) {
-                promise.setFailure(e);
-            }
+        try {
+            socket.leaveGroup(multicastAddress, networkInterface, source);
+            promise.setSuccess();
+        } catch (IOException e) {
+            promise.setFailure(e);
         }
         return promise;
     }
@@ -273,6 +294,13 @@ public final class EpollDatagramChannel extends AbstractEpollChannel implements 
 
     @Override
     protected void doBind(SocketAddress localAddress) throws Exception {
+        if (localAddress instanceof InetSocketAddress) {
+            InetSocketAddress socketAddress = (InetSocketAddress) localAddress;
+            if (socketAddress.getAddress().isAnyLocalAddress() &&
+                    socketAddress.getAddress() instanceof Inet4Address && Socket.isIPv6Preferred()) {
+                localAddress = new InetSocketAddress(LinuxSocket.INET6_ANY, socketAddress.getPort());
+            }
+        }
         super.doBind(localAddress);
         active = true;
     }
@@ -300,7 +328,7 @@ public final class EpollDatagramChannel extends AbstractEpollChannel implements 
                         NativeDatagramPacketArray.NativeDatagramPacket[] packets = array.packets();
 
                         while (cnt > 0) {
-                            int send = Native.sendmmsg(socket.intValue(), packets, offset, cnt);
+                            int send = Native.sendmmsg(socket.intValue(), socket.isIpv6(), packets, offset, cnt);
                             if (send == 0) {
                                 // Did not write all messages.
                                 setFlag(Native.EPOLLOUT);
