@@ -92,11 +92,17 @@ final class KQueueEventLoop extends SingleThreadEventLoop {
 
     void add(AbstractKQueueChannel ch) {
         assert inEventLoop();
-        channels.put(ch.fd().intValue(), ch);
+        AbstractKQueueChannel old = channels.put(ch.fd().intValue(), ch);
+        // We either expect to have no Channel in the map with the same FD or that the FD of the old Channel is already
+        // closed.
+        assert old == null || !old.fd().isOpen();
     }
 
     void evSet(AbstractKQueueChannel ch, short filter, short flags, int fflags) {
-        changeList.evSet(ch, filter, flags, fflags);
+        // Only try to add to changeList if the FD is still open, if not we already closed it in the meantime.
+        if (ch.fd().isOpen()) {
+            changeList.evSet(ch, filter, flags, fflags);
+        }
     }
 
     void remove(AbstractKQueueChannel ch) {

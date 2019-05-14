@@ -25,7 +25,7 @@ import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOption;
 import io.netty.testsuite.transport.TestsuitePermutation;
-import io.netty.testsuite.transport.socket.SocketStringEchoTest;
+import io.netty.testsuite.transport.socket.AbstractSocketTest;
 import io.netty.util.CharsetUtil;
 import io.netty.util.concurrent.ImmediateEventExecutor;
 import io.netty.util.concurrent.Promise;
@@ -37,7 +37,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
-public class KQueueDomainSocketReuseFdTest extends SocketStringEchoTest {
+public class KQueueDomainSocketReuseFdTest extends AbstractSocketTest {
     @Override
     protected SocketAddress newSocketAddress() {
         return KQueueSocketTestPermutation.newSocketAddress();
@@ -102,6 +102,8 @@ public class KQueueDomainSocketReuseFdTest extends SocketStringEchoTest {
     }
 
     static class ReuseFdHandler extends ChannelInboundHandlerAdapter {
+        private static final String EXPECTED_PAYLOAD = "payload";
+
         private final Promise<Void> donePromise;
         private final AtomicInteger remaining;
         private final boolean client;
@@ -126,7 +128,7 @@ public class KQueueDomainSocketReuseFdTest extends SocketStringEchoTest {
         public void channelActive(ChannelHandlerContext ctx) {
             channel = ctx.channel();
             if (client) {
-                ctx.writeAndFlush(Unpooled.copiedBuffer("payload", CharsetUtil.US_ASCII));
+                ctx.writeAndFlush(Unpooled.copiedBuffer(EXPECTED_PAYLOAD, CharsetUtil.US_ASCII));
             }
         }
 
@@ -145,7 +147,7 @@ public class KQueueDomainSocketReuseFdTest extends SocketStringEchoTest {
             if (client) {
                 ctx.close();
             } else {
-                ctx.writeAndFlush(Unpooled.copiedBuffer("payload".getBytes()));
+                ctx.writeAndFlush(Unpooled.copiedBuffer(EXPECTED_PAYLOAD, CharsetUtil.US_ASCII));
             }
         }
 
@@ -161,7 +163,7 @@ public class KQueueDomainSocketReuseFdTest extends SocketStringEchoTest {
         @Override
         public void channelInactive(ChannelHandlerContext ctx) {
             if (remaining.decrementAndGet() == 0) {
-                if (received.toString().equals("payload")) {
+                if (received.toString().equals(EXPECTED_PAYLOAD)) {
                     donePromise.setSuccess(null);
                 } else {
                     donePromise.tryFailure(new Exception("Unexpected payload:" + received));
