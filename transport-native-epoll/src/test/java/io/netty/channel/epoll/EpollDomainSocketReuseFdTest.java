@@ -13,7 +13,7 @@
  * License for the specific language governing permissions and limitations
  * under the License.
  */
-package io.netty.channel.kqueue;
+package io.netty.channel.epoll;
 
 import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
@@ -23,14 +23,14 @@ import io.netty.testsuite.transport.socket.AbstractSocketReuseFdTest;
 import java.net.SocketAddress;
 import java.util.List;
 
-public class KQueueDomainSocketReuseFdTest extends AbstractSocketReuseFdTest {
+public class EpollDomainSocketReuseFdTest extends AbstractSocketReuseFdTest {
     @Override
     protected SocketAddress newSocketAddress() {
-        return KQueueSocketTestPermutation.newSocketAddress();
+        return EpollSocketTestPermutation.newSocketAddress();
     }
 
     @Override
     protected List<TestsuitePermutation.BootstrapComboFactory<ServerBootstrap, Bootstrap>> newFactories() {
-        return KQueueSocketTestPermutation.INSTANCE.domainSocket();
+        return EpollSocketTestPermutation.INSTANCE.domainSocket();
     }
 }

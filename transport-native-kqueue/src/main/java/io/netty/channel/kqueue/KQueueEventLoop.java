@@ -95,24 +95,31 @@ final class KQueueEventLoop extends SingleThreadEventLoop {
         AbstractKQueueChannel old = channels.put(ch.fd().intValue(), ch);
         // We either expect to have no Channel in the map with the same FD or that the FD of the old Channel is already
         // closed.
-        assert old == null || !old.fd().isOpen();
+        assert old == null || !old.isOpen();
     }
 
     void evSet(AbstractKQueueChannel ch, short filter, short flags, int fflags) {
-        // Only try to add to changeList if the FD is still open, if not we already closed it in the meantime.
-        if (ch.fd().isOpen()) {
-            changeList.evSet(ch, filter, flags, fflags);
-        }
+        assert inEventLoop();
+        changeList.evSet(ch, filter, flags, fflags);
     }
 
-    void remove(AbstractKQueueChannel ch) {
+    void remove(AbstractKQueueChannel ch) throws Exception {
         assert inEventLoop();
         int fd = ch.fd().intValue();
-        // Remove only if that's the same channel
-        // Due to file descriptor reuse another channel might have overwritten
-        // the removed channel in the map
-        if (channels.get(fd) == ch) {
-            channels.remove(fd);
+
+        AbstractKQueueChannel old = channels.remove(fd);
+        if (old != null && old != ch) {
+            // The Channel mapping was already replaced due FD reuse, put back the stored Channel.
+            channels.put(fd, old);
+
+            // If we found another Channel in the map that is mapped to the same FD the given Channel MUST be closed.
+            assert !ch.isOpen();
+        } else if (ch.isOpen()) {
+            // Remove the filters. This is only needed if it's still open as otherwise it will be automatically
+            // removed once the file-descriptor is closed.
+            //
+            // See also https://www.freebsd.org/cgi/man.cgi?query=kqueue&sektion=2
+            ch.unregisterFilters();
         }
     }
 
@@ -346,6 +353,14 @@ final class KQueueEventLoop extends SingleThreadEventLoop {
             kqueueWaitNow();
         } catch (IOException e) {
             // ignore on close
+        }
+
+        // Using the intermediate collection to prevent ConcurrentModificationException.
+        // In the `close()` method, the channel is deleted from `channels` map.
+        AbstractKQueueChannel[] localChannels = channels.values().toArray(new AbstractKQueueChannel[0]);
+
+        for (AbstractKQueueChannel ch: localChannels) {
+            ch.unsafe().close(ch.unsafe().voidPromise());
         }
     }
 
